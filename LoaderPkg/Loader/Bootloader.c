@@ -114,6 +114,10 @@ InitGraphics (
   // Hint: Use GetMode/SetMode functions.
   //
 
+  Status = GraphicsOutput->SetMode(GraphicsOutput, 6);
+  // Set 6-th resolution mode: 1024x768
+  //DEBUG((DEBUG_INFO, "\nHorizontalResolution: %d\n", GraphicsOutput->Mode->Info->HorizontalResolution));
+  //DEBUG((DEBUG_INFO, "\nVerticalResolution: %d\n", GraphicsOutput->Mode->Info->VerticalResolution));
 
   //
   // Fill screen with black.
@@ -977,7 +981,7 @@ UefiMain (
   UINTN              EntryPoint;
   VOID               *GateData;
 
-#if 1 ///< Uncomment to await debugging
+#if 0 ///< Uncomment to await debugging
   volatile BOOLEAN   Connected;
   DEBUG ((DEBUG_INFO, "JOS: Awaiting debugger connection\n"));
 
