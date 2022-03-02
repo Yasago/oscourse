@@ -31,6 +31,7 @@ static struct Command commands[] = {
         {"help", "Display this list of commands", mon_help},
         {"kerninfo", "Display information about the kernel", mon_kerninfo},
         {"backtrace", "Print stack backtrace", mon_backtrace},
+        {"customcommand", "Print output of a custom command", mon_customcommand}
 };
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))
 
@@ -58,8 +59,68 @@ mon_kerninfo(int argc, char **argv, struct Trapframe *tf) {
 }
 
 int
+mon_customcommand(int argc, char **argv, struct Trapframe *tf) {
+    cprintf("This is output of a custom command.\n");
+    return 0;
+}
+
+int
 mon_backtrace(int argc, char **argv, struct Trapframe *tf) {
     // LAB 2: Your code here
+
+    cprintf("Stack backtrace:\n");
+    uint64_t rbp = read_rbp();
+    uintptr_t *pointer = (uintptr_t *)rbp;
+    uint64_t rip;
+    uint64_t buf;
+    int digits_16;
+    int code;
+    struct Ripdebuginfo info;
+
+    while (rbp != 0) {
+        buf = rbp;
+
+        digits_16 = 1;
+        buf = buf / 16;
+        while (buf != 0) {
+            digits_16++;
+            buf = buf / 16;
+        }
+
+        cprintf("  rbp ");
+
+        for (int i = 1; i <= 16 - digits_16; i++) {
+            cprintf("0");
+        }
+        cprintf("%lx", rbp);
+
+        rbp = *pointer;
+        pointer++;
+        rip = *pointer;
+        buf = rip;
+        digits_16 = 1;
+        buf = buf / 16;
+        while (buf != 0) {
+            digits_16++;
+            buf = buf / 16;
+        }
+
+        cprintf("  rip ");
+
+        for (int i = 1; i <= 16 - digits_16; i++) {
+            cprintf("0");
+        }
+        cprintf("%lx\n", rip);
+
+        code = debuginfo_rip((uintptr_t)rip, (struct Ripdebuginfo *)&info);
+        if (code == 0) {
+            cprintf("         %s:%d: %s+%lu\n", info.rip_file, info.rip_line, info.rip_fn_name, rip - info.rip_fn_addr);
+        } else {
+            cprintf("Info not found");
+        }
+
+        pointer = (uintptr_t *)rbp;
+    }
 
     return 0;
 }
