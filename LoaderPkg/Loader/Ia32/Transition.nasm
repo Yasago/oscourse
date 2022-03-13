@@ -115,7 +115,7 @@ AsmWithOurGdt:
     or eax, 1 << 5
     mov cr4, eax
 
-    ; 5. Update page table address register (C3) right away with the supplied PAGE_TABLE.
+    ; 5. Update page table address register (CR3) right away with the supplied PAGE_TABLE.
     ; This does nothing as paging is off at the moment as paging is disabled.
     mov eax, [PAGE_TABLE]
     mov cr3, eax
