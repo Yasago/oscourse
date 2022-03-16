@@ -34,6 +34,54 @@ static struct Env *env_free_list;
 /* NOTE: Should be at least LOGNENV */
 #define ENVGENSHIFT 12
 
+// Global descriptor table.
+//
+// Set up global descriptor table (GDT) with separate segments for
+// kernel mode and user mode.  Segments serve many purposes on the x86.
+// We don't use any of their memory-mapping capabilities, but we need
+// them to switch privilege levels.
+//
+// The kernel and user segments are identical except for the DPL.
+// To load the SS register, the CPL must equal the DPL.  Thus,
+// we must duplicate the segments for the user and the kernel.
+//
+// In particular, the last argument to the SEG macro used in the
+// definition of gdt specifies the Descriptor Privilege Level (DPL)
+// of that descriptor: 0 for kernel and 3 for user.
+//
+struct Segdesc32 gdt[2 * NCPU + 7] =
+    {
+        // 0x0 - unused (always faults -- for trapping NULL far pointers)
+        SEG_NULL,
+
+        // 0x8 - kernel code segment
+        [GD_KT >> 3] = SEG64(STA_X | STA_R, 0x0, 0xffffffff, 0),
+
+        // 0x10 - kernel data segment
+        [GD_KD >> 3] = SEG64(STA_W, 0x0, 0xffffffff, 0),
+
+        // 0x18 - kernel code segment 32bit
+        [GD_KT32 >> 3] = SEG32(STA_X | STA_R, 0x0, 0xffffffff, 0),
+
+        // 0x20 - kernel data segment 32bit
+        [GD_KD32 >> 3] = SEG32(STA_W, 0x0, 0xffffffff, 0),
+
+        // 0x28 - user code segment
+        [GD_UT >> 3] = SEG64(STA_X | STA_R, 0x0, 0xffffffff, 3),
+
+        // 0x30 - user data segment
+        [GD_UD >> 3] = SEG64(STA_W, 0x0, 0xffffffff, 3),
+
+        // Per-CPU TSS descriptors (starting from GD_TSS0) are initialized
+        // in trap_init_percpu()
+        [GD_TSS0 >> 3] = SEG_NULL,
+
+        [8] = SEG_NULL //last 8 bytes of the tss since tss is 16 bytes long
+};
+
+struct Pseudodesc gdt_pd = {
+    sizeof(gdt) - 1, (unsigned long)gdt};
+
 /* Converts an envid to an env pointer.
  * If checkperm is set, the specified environment must be either the
  * current environment or an immediate child of the current environment.
@@ -89,7 +137,33 @@ env_init(void) {
     /* Set up envs array */
 
     // LAB 3: Your code here
+    env_free_list = NULL;
+    for (int i = NENV - 1; i >= 0; i--) {
+        envs[i].env_link   = env_free_list;
+        envs[i].env_id     = 0;
+        env_free_list      = &envs[i];
+    }
 
+    // Load GDT and segment descriptors.
+    lgdt(&gdt_pd);
+    // The kernel never uses GS or FS, so we leave those set to
+    // the user data segment.
+    asm volatile("movw %%ax,%%gs" ::"a"(GD_UD | 3));
+    asm volatile("movw %%ax,%%fs" ::"a"(GD_UD | 3));
+    // The kernel does use ES, DS, and SS.  We'll change between
+    // the kernel and user data segments as needed.
+    asm volatile("movw %%ax,%%es" ::"a"(GD_KD));
+    asm volatile("movw %%ax,%%ds" ::"a"(GD_KD));
+    asm volatile("movw %%ax,%%ss" ::"a"(GD_KD));
+    // Load the kernel text segment into CS.
+    asm volatile("pushq %%rbx \n \t movabs $1f,%%rax \n \t pushq %%rax \n\t lretq \n 1:\n" ::"b"(GD_KT)
+                : "cc", "memory");
+    // For good measure, clear the local descriptor table (LDT),
+    // since we don't use it.
+    asm volatile("movw $0,%%ax \n lldt %%ax\n"
+                :
+                :
+                : "cc", "memory");  
 }
 
 /* Allocates and initializes a new environment.
@@ -146,7 +220,12 @@ env_alloc(struct Env **newenv_store, envid_t parent_id, enum EnvType type) {
     env->env_tf.tf_cs = GD_KT;
 
     // LAB 3: Your code here:
-    //static uintptr_t stack_top = 0x2000000;
+    static uintptr_t stack_top = 0x2000000;
+    env->env_tf.tf_rsp = stack_top;
+    stack_top -= 2 * PAGE_SIZE;
+
+    // For now init trapframe with current RFLAGS
+    env->env_tf.tf_rflags = read_rflags();
 #else
     env->env_tf.tf_ds = GD_UD | 3;
     env->env_tf.tf_es = GD_UD | 3;
@@ -174,6 +253,41 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
 
     /* NOTE: find_function from kdebug.c should be used */
 
+    struct Elf *elf    = (struct Elf *)binary;
+    struct Secthdr *sh = (struct Secthdr *)(binary + elf->e_shoff);
+    const char *shstr  = (char *)binary + sh[elf->e_shstrndx].sh_offset;
+
+    // Find string table
+    size_t strtab = -1UL;
+    for (size_t i = 0; i < elf->e_shnum; i++) {
+        if (sh[i].sh_type == ELF_SHT_STRTAB && !strcmp(".strtab", shstr + sh[i].sh_name)) {
+        strtab = i;
+        break;
+        }
+    }
+    const char *strings = (char *)binary + sh[strtab].sh_offset;
+
+    for (size_t i = 0; i < elf->e_shnum; i++) {
+        if (sh[i].sh_type == ELF_SHT_SYMTAB) {
+            struct Elf64_Sym *syms = (struct Elf64_Sym *)(binary + sh[i].sh_offset);
+
+            size_t nsyms = sh[i].sh_size / sizeof(*syms);
+
+            for (size_t j = 0; j < nsyms; j++) {
+                // Only handle symbols that we know how to bind
+                if (ELF64_ST_BIND(syms[j].st_info) == STB_GLOBAL &&
+                    ELF64_ST_TYPE(syms[j].st_info) == STT_OBJECT &&
+                    syms[j].st_size == sizeof(void *)) {
+                    const char *name = strings + syms[j].st_name;
+                    uintptr_t addr = find_function(name);
+
+                    if (addr) {
+                        memcpy((void *)syms[j].st_value, &addr, sizeof(void *));
+                    }
+                }
+            }
+        }
+    }
     return 0;
 }
 
@@ -220,10 +334,50 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
 static int
 load_icode(struct Env *env, uint8_t *binary, size_t size) {
     // LAB 3: Your code here
+    struct Elf *elf = (struct Elf *)binary; // binary приодится к типу указателя на структуру ELF
+    if (elf->e_magic != ELF_MAGIC) {
+        cprintf("Unexpected ELF format\n");
+        return 0;
+    }
+
+    struct Proghdr *ph = (struct Proghdr *)(binary + elf->e_phoff); // Proghdr = prog header. Он лежит со смещением elf->e_phoff относительно начала фаила
+
+    UINT64 start_address = 0;
+    UINT64 end_address = 0;
+
+    for (size_t i = 0; i < elf->e_phnum; i++) { //elf->e_phnum - Число заголовков программы. Если у файла нет таблицы заголовков программы, это поле содержит 0.
+        if (ph[i].p_type == ELF_PROG_LOAD) {
+
+            void *src = binary + ph[i].p_offset;
+            void *dst = (void *)ph[i].p_va;
+
+            size_t memsz  = ph[i].p_memsz;
+            size_t filesz = MIN(ph[i].p_filesz, memsz);
+
+            memcpy(dst, src, filesz);                // копируем в dst (дистинейшн) src (код) размера filesz
+            memset(dst + filesz, 0, memsz - filesz); // обнуление памяти по адресу dst + filesz, где количество нулей = memsz - filesz. Т.е. зануляем всю выделенную память сегмента кода, оставшуюяся после копирования src. Возможно, эта строка не нужна
+        }
+
+        if (!start_address ||
+            (start_address && ph[i].p_va < start_address)) {
+            start_address = ph[i].p_va;
+        }
+ 
+        if (!end_address || (end_address && ph[i].p_va + ph[i].p_memsz > end_address)) {
+            end_address = ph[i].p_va + ph[i].p_memsz;
+        }
+ 
+        memcpy((void *)ph[i].p_va, binary + ph[i].p_offset, MIN(ph[i].p_filesz, ph[i].p_memsz));
+ 
+        memset((void *)ph[i].p_va + ph[i].p_filesz, 0, ph[i].p_memsz - MIN(ph[i].p_filesz, ph[i].p_memsz));
+
+        env->env_tf.tf_rip = elf->e_entry; //Виртуальный адрес точки входа, которому система передает управление при запуске процесса. в регистр rip записываем адрес точки входа для выполнения процесса
+
+        //bind_functions(env, binary, size, start_address, end_address); // Вызывается bind_functions, который связывает все что мы сделали выше (инициализация среды) с "кодом" самого процесса
+    };
 
     return 0;
-}
-
+};
 /* Allocates a new env with env_alloc, loads the named elf
  * binary into it with load_icode, and sets its env_type.
  * This function is ONLY called during kernel initialization,
@@ -233,7 +387,14 @@ load_icode(struct Env *env, uint8_t *binary, size_t size) {
 void
 env_create(uint8_t *binary, size_t size, enum EnvType type) {
     // LAB 3: Your code here
+    struct Env *newenv;
+    if (env_alloc(&newenv, 0, type) < 0) {
+        panic("Can't allocate new environment"); // попытка выделить среду – если нет – вылет по панике ядра
+    }
 
+    newenv->env_type = type;
+
+    load_icode(newenv, binary, size); // load instruction code
 }
 
 
@@ -354,6 +515,23 @@ env_run(struct Env *env) {
     }
 
     // LAB 3: Your code here
+    if (curenv) {                            // if curenv == False, значит, какого-нибудь исполняемого процесса нет
+        if (curenv->env_status == ENV_DYING) { // если процесс стал зомби
+            struct Env *old = curenv;            // ставим старый адрес
+            env_free(curenv);                    // самурай запятнал свой env – убираем его в ножны дабы стереть кровь
+            if (old == env) {                      // e - аргумент функции, который к нам пришел
+                sched_yield();                     // переключение системными вызовами
+            }
+        }   else if (curenv->env_status == ENV_RUNNING) { // если процесс можем запустить
+            curenv->env_status = ENV_RUNNABLE;            // запускаем процесс
+        }
+    }
+
+    curenv             = env;           // текущая среда – е
+    curenv->env_status = ENV_RUNNING; // устанавливаем статус среды на "выполняется"
+    curenv->env_runs++;               // обновляем количество работающих контекстов
+
+    env_pop_tf(&curenv->env_tf);      // восстанавливаем из curen все переменные окружения
 
     while(1) {}
 }
