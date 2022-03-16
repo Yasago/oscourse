@@ -109,7 +109,7 @@ find_function(const char *const fname) {
 
     for (size_t i = 0; i < sizeof(scentry)/sizeof(*scentry); i++) {
         if (!strcmp(scentry[i].name, fname)) {
-            return scentry[i].addr;
+        return scentry[i].addr;
         }
     }
 

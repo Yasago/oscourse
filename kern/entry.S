@@ -78,7 +78,7 @@ sys_exit:
     leaq bootstacktop(%rip),%rsp # в rsp загружаем адрес(leaq) bootstacktop относительно rip
     xor %ebp, %ebp # снова зануляем регистр (xor одинаковых значений). % означает, что это имя регистра
     call csys_exit
-jmp .
+    jmp .
 
 #endif
 

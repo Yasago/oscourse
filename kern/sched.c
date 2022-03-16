@@ -29,11 +29,10 @@ sched_yield(void) {
     int orig = id;
 
     do {
-        id = (id + 1) % NENV; // id ∈ [0; кол-во процессов]
+        id = (id + 1) % NENV;
         if (envs[id].env_status == ENV_RUNNABLE || 
             (id == orig && envs[id].env_status == ENV_RUNNING)) {
-         // Found suitable environment to run
-         env_run(envs + id);  // envs - массив => envs + id - нужный элемент массива
+            env_run(envs + id);
         }
     } while (id != orig);
 

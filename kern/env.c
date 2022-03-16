@@ -137,33 +137,36 @@ env_init(void) {
     /* Set up envs array */
 
     // LAB 3: Your code here
-    env_free_list = NULL;
-    for (int i = NENV - 1; i >= 0; i--) {
-        envs[i].env_link   = env_free_list;
-        envs[i].env_id     = 0;
-        env_free_list      = &envs[i];
+    env_free_list = NULL; // NULLing new env_list 
+    for (int i = NENV - 1; i >= 0; i--) { 
+        envs[i].env_link = env_free_list;
+        envs[i].env_id   = 0;
+        env_free_list    = &envs[i];
     }
+}
 
-    // Load GDT and segment descriptors.
-    lgdt(&gdt_pd);
-    // The kernel never uses GS or FS, so we leave those set to
-    // the user data segment.
-    asm volatile("movw %%ax,%%gs" ::"a"(GD_UD | 3));
-    asm volatile("movw %%ax,%%fs" ::"a"(GD_UD | 3));
-    // The kernel does use ES, DS, and SS.  We'll change between
-    // the kernel and user data segments as needed.
-    asm volatile("movw %%ax,%%es" ::"a"(GD_KD));
-    asm volatile("movw %%ax,%%ds" ::"a"(GD_KD));
-    asm volatile("movw %%ax,%%ss" ::"a"(GD_KD));
-    // Load the kernel text segment into CS.
-    asm volatile("pushq %%rbx \n \t movabs $1f,%%rax \n \t pushq %%rax \n\t lretq \n 1:\n" ::"b"(GD_KT)
-                : "cc", "memory");
-    // For good measure, clear the local descriptor table (LDT),
-    // since we don't use it.
-    asm volatile("movw $0,%%ax \n lldt %%ax\n"
-                :
-                :
-                : "cc", "memory");  
+// Load GDT and segment descriptors.
+void
+env_init_percpu(void) {
+  lgdt(&gdt_pd);
+  // The kernel never uses GS or FS, so we leave those set to
+  // the user data segment.
+  asm volatile("movw %%ax,%%gs" ::"a"(GD_UD | 3));
+  asm volatile("movw %%ax,%%fs" ::"a"(GD_UD | 3));
+  // The kernel does use ES, DS, and SS.  We'll change between
+  // the kernel and user data segments as needed.
+  asm volatile("movw %%ax,%%es" ::"a"(GD_KD));
+  asm volatile("movw %%ax,%%ds" ::"a"(GD_KD));
+  asm volatile("movw %%ax,%%ss" ::"a"(GD_KD));
+  // Load the kernel text segment into CS.
+  asm volatile("pushq %%rbx \n \t movabs $1f,%%rax \n \t pushq %%rax \n\t lretq \n 1:\n" ::"b"(GD_KT)
+               : "cc", "memory");
+  // For good measure, clear the local descriptor table (LDT),
+  // since we don't use it.
+  asm volatile("movw $0,%%ax \n lldt %%ax\n"
+               :
+               :
+               : "cc", "memory");
 }
 
 /* Allocates and initializes a new environment.
@@ -220,11 +223,11 @@ env_alloc(struct Env **newenv_store, envid_t parent_id, enum EnvType type) {
     env->env_tf.tf_cs = GD_KT;
 
     // LAB 3: Your code here:
-    static uintptr_t stack_top = 0x2000000;
-    env->env_tf.tf_rsp = stack_top;
-    stack_top -= 2 * PAGE_SIZE;
+    static uintptr_t STACK_TOP = 0x2000000;
+    env->env_tf.tf_rsp = STACK_TOP;
+    STACK_TOP -= 2 * PAGE_SIZE;
 
-    // For now init trapframe with current RFLAGS
+
     env->env_tf.tf_rflags = read_rflags();
 #else
     env->env_tf.tf_ds = GD_UD | 3;
@@ -334,18 +337,17 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
 static int
 load_icode(struct Env *env, uint8_t *binary, size_t size) {
     // LAB 3: Your code here
-    struct Elf *elf = (struct Elf *)binary; // binary приодится к типу указателя на структуру ELF
+    struct Elf *elf = (struct Elf *)binary;
     if (elf->e_magic != ELF_MAGIC) {
         cprintf("Unexpected ELF format\n");
         return 0;
     }
 
-    struct Proghdr *ph = (struct Proghdr *)(binary + elf->e_phoff); // Proghdr = prog header. Он лежит со смещением elf->e_phoff относительно начала фаила
-
     UINT64 start_address = 0;
     UINT64 end_address = 0;
+    struct Proghdr *ph = (struct Proghdr *)(binary + elf->e_phoff);
 
-    for (size_t i = 0; i < elf->e_phnum; i++) { //elf->e_phnum - Число заголовков программы. Если у файла нет таблицы заголовков программы, это поле содержит 0.
+    for (size_t i = 0; i < elf->e_phnum; i++) {
         if (ph[i].p_type == ELF_PROG_LOAD) {
 
             void *src = binary + ph[i].p_offset;
@@ -354,26 +356,22 @@ load_icode(struct Env *env, uint8_t *binary, size_t size) {
             size_t memsz  = ph[i].p_memsz;
             size_t filesz = MIN(ph[i].p_filesz, memsz);
 
-            memcpy(dst, src, filesz);                // копируем в dst (дистинейшн) src (код) размера filesz
-            memset(dst + filesz, 0, memsz - filesz); // обнуление памяти по адресу dst + filesz, где количество нулей = memsz - filesz. Т.е. зануляем всю выделенную память сегмента кода, оставшуюяся после копирования src. Возможно, эта строка не нужна
+            if (!start_address ||
+                (start_address && ph[i].p_va < start_address)) {
+                start_address = ph[i].p_va;
+            }
+
+            if (!end_address || (end_address && ph[i].p_va + ph[i].p_memsz > end_address)) {
+                end_address = ph[i].p_va + ph[i].p_memsz;
+            }
+
+            memcpy(dst, src, filesz);
+            memset(dst + filesz, 0, memsz - filesz);
         }
 
-        if (!start_address ||
-            (start_address && ph[i].p_va < start_address)) {
-            start_address = ph[i].p_va;
-        }
- 
-        if (!end_address || (end_address && ph[i].p_va + ph[i].p_memsz > end_address)) {
-            end_address = ph[i].p_va + ph[i].p_memsz;
-        }
- 
-        memcpy((void *)ph[i].p_va, binary + ph[i].p_offset, MIN(ph[i].p_filesz, ph[i].p_memsz));
- 
-        memset((void *)ph[i].p_va + ph[i].p_filesz, 0, ph[i].p_memsz - MIN(ph[i].p_filesz, ph[i].p_memsz));
+        env->env_tf.tf_rip = elf->e_entry;
 
-        env->env_tf.tf_rip = elf->e_entry; //Виртуальный адрес точки входа, которому система передает управление при запуске процесса. в регистр rip записываем адрес точки входа для выполнения процесса
-
-        //bind_functions(env, binary, size, start_address, end_address); // Вызывается bind_functions, который связывает все что мы сделали выше (инициализация среды) с "кодом" самого процесса
+        bind_functions(env, binary, size, start_address, end_address);
     };
 
     return 0;
@@ -387,14 +385,14 @@ load_icode(struct Env *env, uint8_t *binary, size_t size) {
 void
 env_create(uint8_t *binary, size_t size, enum EnvType type) {
     // LAB 3: Your code here
-    struct Env *newenv;
+    struct Env *newenv; 
     if (env_alloc(&newenv, 0, type) < 0) {
-        panic("Can't allocate new environment"); // попытка выделить среду – если нет – вылет по панике ядра
+        panic("Can't allocate new environment");
     }
 
     newenv->env_type = type;
 
-    load_icode(newenv, binary, size); // load instruction code
+    load_icode(newenv, binary, size);
 }
 
 
@@ -423,7 +421,11 @@ env_destroy(struct Env *env) {
      * it traps to the kernel. */
 
     // LAB 3: Your code here
-
+    env->env_status = ENV_DYING;
+    if (env == curenv) {
+        env_free(env);
+        sched_yield();
+    }
 }
 
 #ifdef CONFIG_KSPACE
@@ -515,23 +517,23 @@ env_run(struct Env *env) {
     }
 
     // LAB 3: Your code here
-    if (curenv) {                            // if curenv == False, значит, какого-нибудь исполняемого процесса нет
-        if (curenv->env_status == ENV_DYING) { // если процесс стал зомби
-            struct Env *old = curenv;            // ставим старый адрес
-            env_free(curenv);                    // самурай запятнал свой env – убираем его в ножны дабы стереть кровь
-            if (old == env) {                      // e - аргумент функции, который к нам пришел
-                sched_yield();                     // переключение системными вызовами
-            }
-        }   else if (curenv->env_status == ENV_RUNNING) { // если процесс можем запустить
-            curenv->env_status = ENV_RUNNABLE;            // запускаем процесс
+    if (curenv) {  
+        if (curenv->env_status == ENV_DYING) { 
+          struct Env *old = curenv;
+          env_free(curenv);
+          if (old == env) { 
+            sched_yield();
+          }
+        } else if (curenv->env_status == ENV_RUNNING) {
+          curenv->env_status = ENV_RUNNABLE;
         }
     }
 
-    curenv             = env;           // текущая среда – е
-    curenv->env_status = ENV_RUNNING; // устанавливаем статус среды на "выполняется"
-    curenv->env_runs++;               // обновляем количество работающих контекстов
+    curenv = env;
+    curenv->env_status = ENV_RUNNING;
+    curenv->env_runs++;
 
-    env_pop_tf(&curenv->env_tf);      // восстанавливаем из curen все переменные окружения
+    env_pop_tf(&curenv->env_tf);
 
     while(1) {}
 }
