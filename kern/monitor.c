@@ -13,6 +13,7 @@
 #include <kern/kdebug.h>
 #include <kern/env.h>
 #include <kern/trap.h>
+#include <kern/kclock.h>
 
 #define WHITESPACE "\t\r\n "
 #define MAXARGS    16
@@ -34,8 +35,8 @@ static struct Command commands[] = {
         {"help", "Display this list of commands", mon_help},
         {"kerninfo", "Display information about the kernel", mon_kerninfo},
         {"backtrace", "Print stack backtrace", mon_backtrace},
-        {"customcommand", "Print output of a custom command", mon_customcommand}
-        {"dumpcmos", "Print CMOS contents", mon_dumpcmos},
+        {"customcommand", "Print output of a custom command", mon_customcommand},
+        {"dumpcmos", "Print CMOS contents", mon_dumpcmos}
 };
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))
 
@@ -137,7 +138,19 @@ mon_dumpcmos(int argc, char **argv, struct Trapframe *tf) {
     // Make sure you understand the values read.
     // Hint: Use cmos_read8()/cmos_write8() functions.
     // LAB 4: Your code here
+    for (size_t i = CMOS_START; i < CMOS_START + CMOS_SIZE; i++) {
+        if ((i - CMOS_START) % (0xF + 1) == 0) {
+            if (i != CMOS_START) {
+                cprintf("\n");
+            }
 
+            cprintf("%02lx:", i - CMOS_START);
+        }
+
+        cprintf(" %02x", cmos_read8(i));
+    }
+
+    cprintf("\n");    
     return 0;
 }
 
